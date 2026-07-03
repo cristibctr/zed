@@ -1,13 +1,13 @@
 use crate::scroll::ScrollAmount;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
-    AnyElement, Entity, Focusable, FontWeight, ListSizingBehavior, ScrollHandle, ScrollStrategy,
-    SharedString, Size, StrikethroughStyle, StyledText, Task, TaskExt, UniformListScrollHandle,
-    div, px, uniform_list,
+    AnyElement, Entity, Focusable, FontWeight, HighlightStyle, ListSizingBehavior, ScrollHandle,
+    ScrollStrategy, SharedString, Size, StrikethroughStyle, StyledText, Task, TaskExt,
+    UniformListScrollHandle, div, px, uniform_list,
 };
 use itertools::Itertools;
 use language::CodeLabel;
-use language::{Buffer, LanguageName, LanguageRegistry};
+use language::{Buffer, LanguageName, LanguageRegistry, Location, OffsetRangeExt, Point};
 use lsp::{CompletionItemKind, CompletionItemTag};
 use markdown::{CopyButtonVisibility, Markdown, MarkdownElement};
 use multi_buffer::Anchor;
@@ -29,8 +29,8 @@ use std::{
 };
 use task::ResolvedTask;
 use ui::{
-    Divider, ListItem, ListSubHeader, Popover, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
-    prelude::*,
+    Divider, KeyBinding, ListItem, ListSubHeader, Popover, ScrollAxes, Scrollbars, Tooltip,
+    WithScrollbar, prelude::*,
 };
 use util::ResultExt;
 
@@ -38,7 +38,10 @@ use crate::hover_popover::{hover_markdown_style, open_markdown_url};
 use crate::{
     CodeActionProvider, CompletionId, CompletionProvider, DisplayRow, Editor, EditorStyle,
     ResolvedTasks,
-    actions::{ConfirmCodeAction, ConfirmCompletion},
+    actions::{
+        ConfirmCodeAction, ConfirmCompletion, ConfirmPeekReference,
+        OpenPeekedReferencesInMultibuffer,
+    },
     split_words, styled_runs_for_code_label,
 };
 use crate::{CodeActionSource, EditorSettings};
@@ -53,6 +56,8 @@ pub const COMPLETION_MENU_MIN_WIDTH: Pixels = px(280.);
 pub const COMPLETION_MENU_MAX_WIDTH: Pixels = px(540.);
 pub const CODE_ACTION_MENU_MIN_WIDTH: Pixels = px(220.);
 pub const CODE_ACTION_MENU_MAX_WIDTH: Pixels = px(540.);
+pub const REFERENCES_MENU_MIN_WIDTH: Pixels = px(320.);
+pub const REFERENCES_MENU_MAX_WIDTH: Pixels = px(640.);
 
 // Constants for the markdown cache. The purpose of this cache is to reduce flickering due to
 // documentation not yet being parsed.
@@ -91,6 +96,7 @@ impl CompletionMenuEntry {
 pub enum CodeContextMenu {
     Completions(CompletionsMenu),
     CodeActions(CodeActionsMenu),
+    References(ReferencesMenu),
 }
 
 impl CodeContextMenu {
@@ -104,6 +110,7 @@ impl CodeContextMenu {
             match self {
                 CodeContextMenu::Completions(menu) => menu.select_first(provider, window, cx),
                 CodeContextMenu::CodeActions(menu) => menu.select_first(cx),
+                CodeContextMenu::References(menu) => menu.select_first(cx),
             }
             true
         } else {
@@ -121,6 +128,7 @@ impl CodeContextMenu {
             match self {
                 CodeContextMenu::Completions(menu) => menu.select_prev(provider, window, cx),
                 CodeContextMenu::CodeActions(menu) => menu.select_prev(cx),
+                CodeContextMenu::References(menu) => menu.select_prev(cx),
             }
             true
         } else {
@@ -138,6 +146,7 @@ impl CodeContextMenu {
             match self {
                 CodeContextMenu::Completions(menu) => menu.select_next(provider, window, cx),
                 CodeContextMenu::CodeActions(menu) => menu.select_next(cx),
+                CodeContextMenu::References(menu) => menu.select_next(cx),
             }
             true
         } else {
@@ -155,6 +164,7 @@ impl CodeContextMenu {
             match self {
                 CodeContextMenu::Completions(menu) => menu.select_last(provider, window, cx),
                 CodeContextMenu::CodeActions(menu) => menu.select_last(cx),
+                CodeContextMenu::References(menu) => menu.select_last(cx),
             }
             true
         } else {
@@ -166,6 +176,7 @@ impl CodeContextMenu {
         match self {
             CodeContextMenu::Completions(menu) => menu.visible(),
             CodeContextMenu::CodeActions(menu) => menu.visible(),
+            CodeContextMenu::References(menu) => menu.visible(),
         }
     }
 
@@ -173,6 +184,7 @@ impl CodeContextMenu {
         match self {
             CodeContextMenu::Completions(menu) => menu.origin(),
             CodeContextMenu::CodeActions(menu) => menu.origin(),
+            CodeContextMenu::References(menu) => menu.origin(),
         }
     }
 
@@ -190,6 +202,9 @@ impl CodeContextMenu {
             CodeContextMenu::CodeActions(menu) => {
                 menu.render(style, max_height_in_lines, window, cx)
             }
+            CodeContextMenu::References(menu) => {
+                menu.render(style, max_height_in_lines, window, cx)
+            }
         }
     }
 
@@ -202,6 +217,7 @@ impl CodeContextMenu {
         match self {
             CodeContextMenu::Completions(menu) => menu.render_aside(max_size, window, cx),
             CodeContextMenu::CodeActions(menu) => menu.render_aside(max_size, window, cx),
+            CodeContextMenu::References(_) => None,
         }
     }
 
@@ -211,7 +227,7 @@ impl CodeContextMenu {
                 .get_or_create_entry_markdown(completions_menu.selected_item, cx)
                 .as_ref()
                 .is_some_and(|markdown| markdown.focus_handle(cx).contains_focused(window, cx)),
-            CodeContextMenu::CodeActions(_) => false,
+            CodeContextMenu::CodeActions(_) | CodeContextMenu::References(_) => false,
         }
     }
 
@@ -225,7 +241,7 @@ impl CodeContextMenu {
             CodeContextMenu::Completions(completions_menu) => {
                 completions_menu.scroll_aside(scroll_amount, window, cx)
             }
-            CodeContextMenu::CodeActions(_) => (),
+            CodeContextMenu::CodeActions(_) | CodeContextMenu::References(_) => (),
         }
     }
 
@@ -233,6 +249,7 @@ impl CodeContextMenu {
         match self {
             CodeContextMenu::Completions(menu) => menu.scroll_handle.clone(),
             CodeContextMenu::CodeActions(menu) => menu.scroll_handle.clone(),
+            CodeContextMenu::References(menu) => menu.scroll_handle.clone(),
         }
     }
 }
@@ -2037,4 +2054,453 @@ impl CodeActionsMenu {
                 .into_any_element(),
         )
     }
+}
+
+pub enum ReferenceMenuEntry {
+    FileHeader {
+        file_name: SharedString,
+        directory: Option<SharedString>,
+        reference_count: usize,
+    },
+    Reference {
+        location_ix: usize,
+        row: u32,
+        preview: SharedString,
+        highlight: Range<usize>,
+    },
+}
+
+impl ReferenceMenuEntry {
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, ReferenceMenuEntry::Reference { .. })
+    }
+}
+
+/// A popup shown at the cursor by `editor::PeekReferences`, listing references
+/// to the symbol under the cursor grouped by file.
+pub struct ReferencesMenu {
+    pub locations: Vec<Location>,
+    pub entries: Rc<[ReferenceMenuEntry]>,
+    pub selected_item: usize,
+    pub scroll_handle: UniformListScrollHandle,
+}
+
+impl ReferencesMenu {
+    pub fn new(locations: Vec<Location>, cx: &App) -> Self {
+        let mut located = locations
+            .into_iter()
+            .map(|location| {
+                let buffer = location.buffer.read(cx);
+                let full_path = buffer.file().map(|file| file.full_path(cx));
+                let point_range = location.range.to_point(buffer);
+                (full_path, buffer.remote_id(), point_range, location)
+            })
+            .collect::<Vec<_>>();
+        located.sort_unstable_by(|(path_a, id_a, range_a, _), (path_b, id_b, range_b, _)| {
+            (path_a, id_a, &range_a.start, &range_a.end).cmp(&(
+                path_b,
+                id_b,
+                &range_b.start,
+                &range_b.end,
+            ))
+        });
+        located.dedup_by(|(_, id_a, range_a, _), (_, id_b, range_b, _)| {
+            id_a == id_b && range_a == range_b
+        });
+
+        let mut entries = Vec::new();
+        let mut locations = Vec::with_capacity(located.len());
+        let mut group_start = 0;
+        while group_start < located.len() {
+            let group_buffer_id = located[group_start].1;
+            let group_end = located[group_start..]
+                .iter()
+                .position(|(_, buffer_id, ..)| *buffer_id != group_buffer_id)
+                .map(|offset| group_start + offset)
+                .unwrap_or(located.len());
+
+            let group_buffer = located[group_start].3.buffer.read(cx);
+            let (file_name, directory) = match group_buffer.file() {
+                Some(file) => {
+                    let directory = file
+                        .full_path(cx)
+                        .parent()
+                        .map(|parent| parent.to_string_lossy().into_owned())
+                        .filter(|directory| !directory.is_empty())
+                        .map(SharedString::from);
+                    (SharedString::from(file.file_name(cx).to_owned()), directory)
+                }
+                None => (SharedString::from("untitled"), None),
+            };
+            entries.push(ReferenceMenuEntry::FileHeader {
+                file_name,
+                directory,
+                reference_count: group_end - group_start,
+            });
+
+            for (_, _, point_range, location) in &located[group_start..group_end] {
+                let buffer = location.buffer.read(cx);
+                let (preview, highlight) = Self::preview_for_location(buffer, point_range);
+                entries.push(ReferenceMenuEntry::Reference {
+                    location_ix: locations.len(),
+                    row: point_range.start.row,
+                    preview,
+                    highlight,
+                });
+                locations.push(Location {
+                    buffer: location.buffer.clone(),
+                    range: location.range.clone(),
+                });
+            }
+            group_start = group_end;
+        }
+
+        let selected_item = entries
+            .iter()
+            .position(|entry| entry.is_selectable())
+            .unwrap_or(0);
+        Self {
+            locations,
+            entries: entries.into(),
+            selected_item,
+            scroll_handle: UniformListScrollHandle::default(),
+        }
+    }
+
+    fn preview_for_location(
+        buffer: &Buffer,
+        point_range: &Range<Point>,
+    ) -> (SharedString, Range<usize>) {
+        const MAX_PREVIEW_BYTES: usize = 200;
+        let row = point_range.start.row;
+        let line_range = Point::new(row, 0)..Point::new(row, buffer.line_len(row));
+        // Tabs are replaced with spaces (same byte length) so that byte offsets
+        // computed below remain valid for the preview string.
+        let line_text = buffer
+            .text_for_range(line_range)
+            .collect::<String>()
+            .replace('\t', " ");
+        let trim_offset = line_text.len() - line_text.trim_start().len();
+        let mut preview = line_text.trim().to_string();
+        if preview.len() > MAX_PREVIEW_BYTES {
+            let cut = clamp_to_char_boundary(&preview, MAX_PREVIEW_BYTES);
+            preview.truncate(cut);
+            preview.push('…');
+        }
+        let highlight_start = (point_range.start.column as usize).saturating_sub(trim_offset);
+        let highlight_end = if point_range.end.row == row {
+            (point_range.end.column as usize).saturating_sub(trim_offset)
+        } else {
+            preview.len()
+        };
+        let highlight_start = clamp_to_char_boundary(&preview, highlight_start);
+        let highlight_end = clamp_to_char_boundary(&preview, highlight_end).max(highlight_start);
+        (preview.into(), highlight_start..highlight_end)
+    }
+
+    fn select_first(&mut self, cx: &mut Context<Editor>) {
+        let y_flipped = self.scroll_handle.y_flipped();
+        let start = if y_flipped {
+            self.entries.len().saturating_sub(1)
+        } else {
+            0
+        };
+        if let Some(index) = self.find_selectable_entry(start, !y_flipped) {
+            self.set_selected_index(index, cx);
+        }
+    }
+
+    fn select_last(&mut self, cx: &mut Context<Editor>) {
+        let y_flipped = self.scroll_handle.y_flipped();
+        let start = if y_flipped {
+            0
+        } else {
+            self.entries.len().saturating_sub(1)
+        };
+        if let Some(index) = self.find_selectable_entry(start, y_flipped) {
+            self.set_selected_index(index, cx);
+        }
+    }
+
+    fn select_prev(&mut self, cx: &mut Context<Editor>) {
+        let index = if self.scroll_handle.y_flipped() {
+            self.next_match_index()
+        } else {
+            self.prev_match_index()
+        };
+        self.set_selected_index(index, cx);
+    }
+
+    fn select_next(&mut self, cx: &mut Context<Editor>) {
+        let index = if self.scroll_handle.y_flipped() {
+            self.prev_match_index()
+        } else {
+            self.next_match_index()
+        };
+        self.set_selected_index(index, cx);
+    }
+
+    fn set_selected_index(&mut self, index: usize, cx: &mut Context<Editor>) {
+        self.selected_item = index;
+        // Scroll to the preceding file header when selecting the first
+        // reference of a group, so the header stays visible.
+        let mut scroll_target = index;
+        if scroll_target > 0
+            && self
+                .entries
+                .get(scroll_target - 1)
+                .is_some_and(|entry| !entry.is_selectable())
+        {
+            scroll_target -= 1;
+        }
+        self.scroll_handle
+            .scroll_to_item(scroll_target, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn prev_match_index(&self) -> usize {
+        let len = self.entries.len();
+        if len == 0 {
+            return 0;
+        }
+        let start = if self.selected_item > 0 {
+            self.selected_item - 1
+        } else {
+            len - 1
+        };
+        self.find_selectable_entry(start, false)
+            .unwrap_or(self.selected_item)
+    }
+
+    fn next_match_index(&self) -> usize {
+        let len = self.entries.len();
+        if len == 0 {
+            return 0;
+        }
+        let start = if self.selected_item + 1 < len {
+            self.selected_item + 1
+        } else {
+            0
+        };
+        self.find_selectable_entry(start, true)
+            .unwrap_or(self.selected_item)
+    }
+
+    fn find_selectable_entry(&self, start: usize, forward: bool) -> Option<usize> {
+        let len = self.entries.len();
+        if len == 0 {
+            return None;
+        }
+        let mut index = start;
+        loop {
+            if self.entries[index].is_selectable() {
+                return Some(index);
+            }
+            if forward {
+                index = if index + 1 < len { index + 1 } else { 0 };
+            } else {
+                index = if index > 0 { index - 1 } else { len - 1 };
+            }
+            if index == start {
+                return None;
+            }
+        }
+    }
+
+    pub fn visible(&self) -> bool {
+        self.entries.iter().any(|entry| entry.is_selectable())
+    }
+
+    fn origin(&self) -> ContextMenuOrigin {
+        ContextMenuOrigin::Cursor
+    }
+
+    fn render(
+        &self,
+        style: &EditorStyle,
+        max_height_in_lines: u32,
+        window: &mut Window,
+        cx: &mut Context<Editor>,
+    ) -> AnyElement {
+        let entries = self.entries.clone();
+        let selected_item = self.selected_item;
+        let style = style.clone();
+
+        let widest_entry_ix = self
+            .entries
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, entry)| match entry {
+                ReferenceMenuEntry::FileHeader {
+                    file_name,
+                    directory,
+                    ..
+                } => {
+                    file_name.chars().count()
+                        + directory
+                            .as_ref()
+                            .map_or(0, |directory| directory.chars().count() + 1)
+                        + 8
+                }
+                ReferenceMenuEntry::Reference { preview, .. } => preview.chars().count() + 8,
+            })
+            .map(|(ix, _)| ix);
+
+        let list = uniform_list(
+            "peek_references_menu",
+            self.entries.len(),
+            cx.processor(move |_editor, range: Range<usize>, _window, cx| {
+                entries[range.clone()]
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, entry)| {
+                        let item_ix = range.start + ix;
+                        match entry {
+                            ReferenceMenuEntry::FileHeader {
+                                file_name,
+                                directory,
+                                reference_count,
+                            } => h_flex()
+                                .gap_1p5()
+                                .min_w(REFERENCES_MENU_MIN_WIDTH)
+                                .max_w(REFERENCES_MENU_MAX_WIDTH)
+                                .px_2()
+                                .child(Label::new(file_name.clone()).size(LabelSize::Small))
+                                .when_some(directory.clone(), |this, directory| {
+                                    this.child(
+                                        div().overflow_hidden().text_ellipsis().child(
+                                            Label::new(directory)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        ),
+                                    )
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Label::new(reference_count.to_string())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .into_any_element(),
+                            ReferenceMenuEntry::Reference {
+                                row,
+                                preview,
+                                highlight,
+                                ..
+                            } => {
+                                let selected = item_ix == selected_item;
+                                let highlight_style = HighlightStyle {
+                                    color: Some(cx.theme().colors().text_accent),
+                                    font_weight: Some(FontWeight::BOLD),
+                                    ..Default::default()
+                                };
+                                ListItem::new(item_ix)
+                                    .inset(true)
+                                    .toggle_state(selected)
+                                    .overflow_x()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .min_w(REFERENCES_MENU_MIN_WIDTH)
+                                            .max_w(REFERENCES_MENU_MAX_WIDTH)
+                                            .child(
+                                                h_flex().min_w(px(32.)).justify_end().child(
+                                                    Label::new((row + 1).to_string())
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Muted),
+                                                ),
+                                            )
+                                            .child(
+                                                div().overflow_hidden().text_ellipsis().child(
+                                                    StyledText::new(preview.clone())
+                                                        .with_default_highlights(
+                                                            &style.text,
+                                                            [(highlight.clone(), highlight_style)],
+                                                        ),
+                                                ),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |editor, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if editor
+                                            .confirm_peek_reference(
+                                                &ConfirmPeekReference {
+                                                    item_ix: Some(item_ix),
+                                                },
+                                                window,
+                                                cx,
+                                            )
+                                            .is_none()
+                                        {
+                                            log::error!(
+                                                "no reference to confirm at the clicked peek references menu entry"
+                                            );
+                                        }
+                                    }))
+                                    .into_any_element()
+                            }
+                        }
+                    })
+                    .collect()
+            }),
+        )
+        .occlude()
+        .max_h(max_height_in_lines as f32 * window.line_height())
+        .track_scroll(&self.scroll_handle)
+        .with_width_from_item(widest_entry_ix)
+        .with_sizing_behavior(ListSizingBehavior::Infer);
+
+        let reference_count = self.locations.len();
+        let file_count = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_selectable())
+            .count();
+        let footer = h_flex()
+            .justify_between()
+            .gap_2()
+            .px_1p5()
+            .py_0p5()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Label::new(format!(
+                    "{} reference{} in {} file{}",
+                    reference_count,
+                    if reference_count == 1 { "" } else { "s" },
+                    file_count,
+                    if file_count == 1 { "" } else { "s" },
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Button::new("peek_references_open_multibuffer", "Open in Multibuffer")
+                    .label_size(LabelSize::Small)
+                    .key_binding(KeyBinding::for_action(
+                        &OpenPeekedReferencesInMultibuffer,
+                        cx,
+                    ))
+                    .on_click(cx.listener(|editor, _, window, cx| {
+                        cx.stop_propagation();
+                        editor.open_peeked_references_in_multibuffer(
+                            &OpenPeekedReferencesInMultibuffer,
+                            window,
+                            cx,
+                        );
+                    })),
+            );
+
+        Popover::new()
+            .child(v_flex().occlude().child(list).child(footer))
+            .into_any_element()
+    }
+}
+
+fn clamp_to_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }

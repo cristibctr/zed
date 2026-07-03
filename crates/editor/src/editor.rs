@@ -136,7 +136,7 @@ use client::{Collaborator, ParticipantIndex, parse_zed_link};
 use clock::ReplicaId;
 use code_context_menus::{
     AvailableCodeAction, CodeActionContents, CodeActionsItem, CodeActionsMenu, CodeContextMenu,
-    CompletionsMenu, ContextMenuOrigin,
+    CompletionsMenu, ContextMenuOrigin, ReferenceMenuEntry, ReferencesMenu,
 };
 use code_lens::CodeLensState;
 use collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -2697,6 +2697,12 @@ impl Editor {
                 if menu.visible() {
                     key_context.add("menu");
                     key_context.add("showing_code_actions")
+                }
+            }
+            Some(CodeContextMenu::References(menu)) => {
+                if menu.visible() {
+                    key_context.add("menu");
+                    key_context.add("showing_peek_references")
                 }
             }
             None => {}

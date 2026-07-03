@@ -111,7 +111,7 @@ impl Editor {
             .as_ref()
             .and_then(|menu| match menu {
                 CodeContextMenu::Completions(completions_menu) => Some(completions_menu.source),
-                CodeContextMenu::CodeActions(_) => None,
+                CodeContextMenu::CodeActions(_) | CodeContextMenu::References(_) => None,
             });
 
         match completions_source {
@@ -261,7 +261,7 @@ impl Editor {
             .as_ref()
             .and_then(|menu| match menu {
                 CodeContextMenu::Completions(completions_menu) => Some(completions_menu.source),
-                CodeContextMenu::CodeActions(_) => None,
+                CodeContextMenu::CodeActions(_) | CodeContextMenu::References(_) => None,
             });
 
         let multibuffer_snapshot = self.buffer.read(cx).read(cx);

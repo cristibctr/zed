@@ -1598,7 +1598,7 @@ impl Editor {
             let mut context_menu = self.context_menu.borrow_mut();
             let completion_menu = match context_menu.as_ref() {
                 Some(CodeContextMenu::Completions(menu)) => Some(menu),
-                Some(CodeContextMenu::CodeActions(_)) => {
+                Some(CodeContextMenu::CodeActions(_)) | Some(CodeContextMenu::References(_)) => {
                     *context_menu = None;
                     None
                 }

@@ -1333,67 +1333,13 @@ impl Editor {
 
                 return editor.update_in(cx, |editor, window, cx| {
                     let range = target_range.to_point(target_buffer.read(cx));
-                    let range = editor.range_for_match(&range);
-                    let range = range.start..range.start;
-
-                    if Some(&target_buffer) == editor.buffer.read(cx).as_singleton().as_ref() {
-                        editor.go_to_singleton_buffer_range(range, window, cx);
-                    } else {
-                        let pane = workspace.read(cx).active_pane().clone();
-                        window.defer(cx, move |window, cx| {
-                            let target_editor: Entity<Self> =
-                                workspace.update(cx, |workspace, cx| {
-                                    let pane = workspace.active_pane().clone();
-
-                                    let preview_tabs_settings = PreviewTabsSettings::get_global(cx);
-                                    let keep_old_preview = preview_tabs_settings
-                                        .enable_keep_preview_on_code_navigation;
-                                    let allow_new_preview = preview_tabs_settings
-                                        .enable_preview_file_from_code_navigation;
-
-                                    workspace.open_project_item(
-                                        pane,
-                                        target_buffer.clone(),
-                                        true,
-                                        true,
-                                        keep_old_preview,
-                                        allow_new_preview,
-                                        window,
-                                        cx,
-                                    )
-                                });
-                            target_editor.update(cx, |target_editor, cx| {
-                                // When selecting a definition in a different buffer, disable the nav history
-                                // to avoid creating a history entry at the previous cursor location.
-                                pane.update(cx, |pane, _| pane.disable_history());
-                                target_editor.go_to_singleton_buffer_range(range, window, cx);
-                                pane.update(cx, |pane, _| pane.enable_history());
-                            });
-                        });
-                    }
+                    editor.navigate_to_buffer_location(target_buffer, range, window, cx);
                     Navigated::No
                 });
             }
 
             workspace.update_in(cx, |workspace, window, cx| {
-                let target = locations
-                    .iter()
-                    .flat_map(|(k, v)| iter::repeat(k.clone()).zip(v))
-                    .map(|(buffer, location)| {
-                        buffer
-                            .read(cx)
-                            .text_for_range(location.clone())
-                            .collect::<String>()
-                    })
-                    .filter(|text| !text.contains('\n'))
-                    .unique()
-                    .take(3)
-                    .join(", ");
-                let title = if target.is_empty() {
-                    "References".to_owned()
-                } else {
-                    format!("References to {target}")
-                };
+                let title = Self::references_multibuffer_title(&locations, cx);
                 let allow_preview = PreviewTabsSettings::get_global(cx)
                     .enable_preview_multibuffer_from_code_navigation;
                 Self::open_locations_in_multibuffer(
@@ -1409,6 +1355,227 @@ impl Editor {
                 Navigated::Yes
             })
         }))
+    }
+
+    fn references_multibuffer_title(
+        locations: &std::collections::HashMap<Entity<Buffer>, Vec<Range<Point>>>,
+        cx: &App,
+    ) -> String {
+        let target = locations
+            .iter()
+            .flat_map(|(buffer, ranges)| iter::repeat(buffer.clone()).zip(ranges))
+            .map(|(buffer, range)| {
+                buffer
+                    .read(cx)
+                    .text_for_range(range.clone())
+                    .collect::<String>()
+            })
+            .filter(|text| !text.contains('\n'))
+            .unique()
+            .take(3)
+            .join(", ");
+        if target.is_empty() {
+            "References".to_owned()
+        } else {
+            format!("References to {target}")
+        }
+    }
+
+    /// Moves the cursor to `target_range` in `target_buffer`, opening that
+    /// buffer in the active pane if it is not the one displayed by this editor.
+    pub(crate) fn navigate_to_buffer_location(
+        &mut self,
+        target_buffer: Entity<Buffer>,
+        target_range: Range<Point>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = self.range_for_match(&target_range);
+        let range = range.start..range.start;
+
+        if Some(&target_buffer) == self.buffer.read(cx).as_singleton().as_ref() {
+            self.go_to_singleton_buffer_range(range, window, cx);
+        } else {
+            let Some(workspace) = self.workspace() else {
+                return;
+            };
+            let pane = workspace.read(cx).active_pane().clone();
+            window.defer(cx, move |window, cx| {
+                let target_editor: Entity<Self> = workspace.update(cx, |workspace, cx| {
+                    let pane = workspace.active_pane().clone();
+
+                    let preview_tabs_settings = PreviewTabsSettings::get_global(cx);
+                    let keep_old_preview =
+                        preview_tabs_settings.enable_keep_preview_on_code_navigation;
+                    let allow_new_preview =
+                        preview_tabs_settings.enable_preview_file_from_code_navigation;
+
+                    workspace.open_project_item(
+                        pane,
+                        target_buffer.clone(),
+                        true,
+                        true,
+                        keep_old_preview,
+                        allow_new_preview,
+                        window,
+                        cx,
+                    )
+                });
+                target_editor.update(cx, |target_editor, cx| {
+                    // When selecting a definition in a different buffer, disable the nav history
+                    // to avoid creating a history entry at the previous cursor location.
+                    pane.update(cx, |pane, _| pane.disable_history());
+                    target_editor.go_to_singleton_buffer_range(range, window, cx);
+                    pane.update(cx, |pane, _| pane.enable_history());
+                });
+            });
+        }
+    }
+
+    /// Shows references to the symbol under the cursor in a popup at the
+    /// cursor position, rather than opening them in a multibuffer the way
+    /// [`Self::find_all_references`] does. Invoking the action while the popup
+    /// is already shown closes it.
+    pub fn peek_references(
+        &mut self,
+        _: &PeekReferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<()>>> {
+        {
+            let mut context_menu = self.context_menu.borrow_mut();
+            if let Some(CodeContextMenu::References(_)) = context_menu.as_ref() {
+                *context_menu = None;
+                cx.notify();
+                return Some(Task::ready(Ok(())));
+            }
+        }
+
+        let head = self.selections.newest_anchor().head();
+        let multi_buffer = self.buffer.read(cx);
+        let (buffer, text_head) = multi_buffer.text_anchor_for_position(head, cx)?;
+        let workspace = self.workspace()?;
+        let project = workspace.read(cx).project().clone();
+        let references =
+            project.update(cx, |project, cx| project.references(&buffer, text_head, cx));
+        Some(cx.spawn_in(window, async move |editor, cx| {
+            let Some(locations) = references.await? else {
+                return anyhow::Ok(());
+            };
+            if locations.is_empty() {
+                // totally normal - the cursor may be on something which is not
+                // a symbol (e.g. a keyword)
+                log::info!("no references found under cursor");
+                return Ok(());
+            }
+
+            editor.update_in(cx, |editor, _window, cx| {
+                let snapshot = editor.buffer.read(cx).snapshot(cx);
+                if editor
+                    .selections
+                    .newest_anchor()
+                    .head()
+                    .to_offset(&snapshot)
+                    != head.to_offset(&snapshot)
+                {
+                    // The cursor moved while references were being fetched, so
+                    // the popup would be anchored to a stale position.
+                    return;
+                }
+
+                let menu = ReferencesMenu::new(locations, cx);
+                if !menu.visible() {
+                    return;
+                }
+                crate::hover_popover::hide_hover(editor, cx);
+                *editor.context_menu.borrow_mut() = Some(CodeContextMenu::References(menu));
+                cx.notify();
+            })?;
+            Ok(())
+        }))
+    }
+
+    /// Navigates to the reference selected in the peek references popup (or
+    /// the one at `item_ix`, when provided) and closes the popup.
+    pub fn confirm_peek_reference(
+        &mut self,
+        action: &ConfirmPeekReference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<()> {
+        {
+            let context_menu = self.context_menu.borrow();
+            if !matches!(context_menu.as_ref(), Some(CodeContextMenu::References(_))) {
+                return None;
+            }
+        }
+        let CodeContextMenu::References(menu) = self.hide_context_menu(window, cx)? else {
+            return None;
+        };
+
+        let entry_ix = action.item_ix.unwrap_or(menu.selected_item);
+        let ReferenceMenuEntry::Reference { location_ix, .. } = menu.entries.get(entry_ix)? else {
+            return None;
+        };
+        let location = menu.locations.get(*location_ix)?;
+        let target_range = location.range.to_point(location.buffer.read(cx));
+        self.navigate_to_buffer_location(location.buffer.clone(), target_range, window, cx);
+        Some(())
+    }
+
+    /// Opens the references listed in the peek references popup in a
+    /// multibuffer, mirroring the `editor::FindAllReferences` workflow.
+    pub fn open_peeked_references_in_multibuffer(
+        &mut self,
+        _: &OpenPeekedReferencesInMultibuffer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        {
+            let context_menu = self.context_menu.borrow();
+            if !matches!(context_menu.as_ref(), Some(CodeContextMenu::References(_))) {
+                cx.propagate();
+                return;
+            }
+        }
+        let Some(CodeContextMenu::References(menu)) = self.hide_context_menu(window, cx) else {
+            return;
+        };
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+
+        let mut locations = menu
+            .locations
+            .into_iter()
+            .map(|location| {
+                let range = location.range.to_point(location.buffer.read(cx));
+                (location.buffer, range)
+            })
+            .into_group_map();
+        for ranges in locations.values_mut() {
+            ranges.sort_unstable_by_key(|range| (range.start, Reverse(range.end)));
+            ranges.dedup();
+        }
+        if locations.is_empty() {
+            return;
+        }
+
+        let title = Self::references_multibuffer_title(&locations, cx);
+        let allow_preview =
+            PreviewTabsSettings::get_global(cx).enable_preview_multibuffer_from_code_navigation;
+        workspace.update(cx, |workspace, cx| {
+            Self::open_locations_in_multibuffer(
+                workspace,
+                locations,
+                title,
+                false,
+                allow_preview,
+                MultibufferSelectionMode::First,
+                window,
+                cx,
+            );
+        });
     }
 
     pub(super) fn navigation_entry(

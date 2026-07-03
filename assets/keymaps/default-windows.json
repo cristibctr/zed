@@ -865,7 +865,15 @@
     },
   },
   {
-    "context": "Editor && (showing_code_actions || showing_completions)",
+    "context": "Editor && showing_peek_references",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "editor::ConfirmPeekReference",
+      "shift-enter": "editor::OpenPeekedReferencesInMultibuffer",
+    },
+  },
+  {
+    "context": "Editor && (showing_code_actions || showing_completions || showing_peek_references)",
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",

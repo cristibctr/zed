@@ -139,6 +139,15 @@ pub struct ConfirmCodeAction {
     pub item_ix: Option<usize>,
 }
 
+/// Navigates to the currently selected reference in the peek references popup.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = editor)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmPeekReference {
+    #[serde(default)]
+    pub item_ix: Option<usize>,
+}
+
 /// Toggles comment markers for the selected lines.
 #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
 #[action(namespace = editor)]
@@ -720,6 +729,8 @@ actions!(
         /// Opens the file whose name is selected in the editor.
         #[action(deprecated_aliases = ["editor::OpenFile"])]
         OpenSelectedFilename,
+        /// Opens all references from the peek references popup in a multibuffer.
+        OpenPeekedReferencesInMultibuffer,
         /// Opens all selections in a multibuffer.
         OpenSelectionsInMultibuffer,
         /// Opens the URL at cursor position.
@@ -736,6 +747,9 @@ actions!(
         PageUp,
         /// Pastes from clipboard.
         Paste,
+        /// Shows references to the symbol under the cursor in a popup at the
+        /// cursor position.
+        PeekReferences,
         /// Navigates to the previous edit prediction.
         PreviousEditPrediction,
         /// Goes to the previous snippet tabstop if one exists.

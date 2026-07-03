@@ -22520,7 +22520,7 @@ async fn test_completions_resolve_updates_labels_if_filter_text_matches(cx: &mut
                     vec!["method id()", "other"]
                 )
             }
-            CodeContextMenu::CodeActions(_) => panic!("Should show the completions menu"),
+            _ => panic!("Should show the completions menu"),
         }
     });
 
@@ -22577,7 +22577,7 @@ async fn test_completions_resolve_updates_labels_if_filter_text_matches(cx: &mut
                     "Should update first completion label, but not second as the filter text did not match."
                 );
             }
-            CodeContextMenu::CodeActions(_) => panic!("Should show the completions menu"),
+            _ => panic!("Should show the completions menu"),
         }
     });
 }
@@ -22845,7 +22845,7 @@ async fn test_completions_resolve_happens_once(cx: &mut TestAppContext) {
                     vec!["id", "other"]
                 )
             }
-            CodeContextMenu::CodeActions(_) => panic!("Should show the completions menu"),
+            _ => panic!("Should show the completions menu"),
         }
     });
     cx.run_until_parked();
@@ -23009,7 +23009,7 @@ async fn test_completions_default_resolve_data_handling(cx: &mut TestAppContext)
                         .collect::<Vec<String>>()
                 );
             }
-            CodeContextMenu::CodeActions(_) => panic!("Expected to have the completions menu"),
+            _ => panic!("Expected to have the completions menu"),
         }
     });
     // Approximate initial displayed interval is 0..12. With extra item padding of 4 this is 0..16
@@ -27569,6 +27569,150 @@ async fn test_find_all_references_editor_reuse(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn test_peek_references_popup(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            references_provider: Some(lsp::OneOf::Left(true)),
+            ..lsp::ServerCapabilities::default()
+        },
+        cx,
+    )
+    .await;
+
+    cx.set_state(
+        &r#"
+        fn one() {
+            let mut a = two();
+            let mut b = two();
+        }
+
+        fn ˇtwo() {}"#
+            .unindent(),
+    );
+    cx.lsp
+        .set_request_handler::<lsp::request::References, _, _>(move |params, _| async move {
+            Ok(Some(vec![
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri.clone(),
+                    range: lsp::Range::new(lsp::Position::new(1, 16), lsp::Position::new(1, 19)),
+                },
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri.clone(),
+                    range: lsp::Range::new(lsp::Position::new(2, 16), lsp::Position::new(2, 19)),
+                },
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri,
+                    range: lsp::Range::new(lsp::Position::new(5, 3), lsp::Position::new(5, 6)),
+                },
+            ]))
+        });
+
+    cx.update_editor(|editor, window, cx| editor.peek_references(&PeekReferences, window, cx))
+        .expect("should have spawned a references request")
+        .await
+        .expect("references request should succeed");
+
+    cx.update_editor(|editor, _, _| {
+        let context_menu = editor.context_menu.borrow();
+        let Some(CodeContextMenu::References(menu)) = context_menu.as_ref() else {
+            panic!("expected the peek references popup to be shown");
+        };
+        assert_eq!(menu.locations.len(), 3);
+        assert_eq!(
+            menu.entries.len(),
+            4,
+            "expected a file header entry followed by 3 reference entries"
+        );
+        assert!(
+            !menu.entries[0].is_selectable(),
+            "the file header should not be selectable"
+        );
+        assert_eq!(
+            menu.selected_item, 1,
+            "the first reference should be selected initially"
+        );
+        match &menu.entries[1] {
+            ReferenceMenuEntry::Reference {
+                row,
+                preview,
+                highlight,
+                ..
+            } => {
+                assert_eq!(*row, 1);
+                assert_eq!(preview.as_ref(), "let mut a = two();");
+                assert_eq!(highlight.clone(), 12..15, "highlight should cover `two`");
+            }
+            ReferenceMenuEntry::FileHeader { .. } => {
+                panic!("expected a reference entry, got a file header")
+            }
+        }
+    });
+
+    cx.update_editor(|editor, window, cx| {
+        // Wrapping past the last reference should skip the file header.
+        editor.context_menu_next(&ContextMenuNext, window, cx);
+        editor.context_menu_next(&ContextMenuNext, window, cx);
+        editor.context_menu_next(&ContextMenuNext, window, cx);
+        let context_menu = editor.context_menu.borrow();
+        let Some(CodeContextMenu::References(menu)) = context_menu.as_ref() else {
+            panic!("expected the peek references popup to be shown");
+        };
+        assert_eq!(
+            menu.selected_item, 1,
+            "selection should wrap around, skipping the file header"
+        );
+    });
+
+    cx.update_editor(|editor, window, cx| {
+        editor.context_menu_next(&ContextMenuNext, window, cx);
+        editor
+            .confirm_peek_reference(&ConfirmPeekReference::default(), window, cx)
+            .expect("confirming a selected reference should navigate");
+        assert!(
+            editor.context_menu.borrow().is_none(),
+            "the popup should close after confirming"
+        );
+    });
+    cx.assert_editor_state(
+        &r#"
+        fn one() {
+            let mut a = two();
+            let mut b = ˇtwo();
+        }
+
+        fn two() {}"#
+            .unindent(),
+    );
+
+    // Invoking the action while the popup is shown toggles it closed.
+    cx.update_editor(|editor, window, cx| editor.peek_references(&PeekReferences, window, cx))
+        .expect("should have spawned a references request")
+        .await
+        .expect("references request should succeed");
+    cx.update_editor(|editor, _, _| {
+        assert!(
+            matches!(
+                editor.context_menu.borrow().as_ref(),
+                Some(CodeContextMenu::References(_))
+            ),
+            "expected the peek references popup to be shown again"
+        );
+    });
+    cx.update_editor(|editor, window, cx| editor.peek_references(&PeekReferences, window, cx))
+        .expect("toggling the popup closed should return a task")
+        .await
+        .expect("toggling the popup closed should succeed");
+    cx.update_editor(|editor, _, _| {
+        assert!(
+            editor.context_menu.borrow().is_none(),
+            "the popup should toggle closed when the action is invoked again"
+        );
+    });
+}
+
 #[gpui::test]
 async fn test_find_enclosing_node_with_task(cx: &mut TestAppContext) {
     init_test(cx, |_| {});

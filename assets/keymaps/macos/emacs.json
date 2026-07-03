@@ -120,7 +120,7 @@
     },
   },
   {
-    "context": "Editor && (showing_code_actions || showing_completions)",
+    "context": "Editor && (showing_code_actions || showing_completions || showing_peek_references)",
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",
       "ctrl-n": "editor::ContextMenuNext",

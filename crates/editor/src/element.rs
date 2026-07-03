@@ -525,6 +525,19 @@ impl EditorElement {
                 cx.propagate();
             }
         });
+        register_action(editor, window, |editor, action, window, cx| {
+            if let Some(task) = editor.peek_references(action, window, cx) {
+                task.detach_and_log_err(cx);
+            } else {
+                cx.propagate();
+            }
+        });
+        register_action(editor, window, |editor, action, window, cx| {
+            if editor.confirm_peek_reference(action, window, cx).is_none() {
+                cx.propagate();
+            }
+        });
+        register_action(editor, window, Editor::open_peeked_references_in_multibuffer);
         register_action(editor, window, Editor::show_signature_help);
         register_action(editor, window, Editor::signature_help_prev);
         register_action(editor, window, Editor::signature_help_next);

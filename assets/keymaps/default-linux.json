@@ -871,7 +871,14 @@
     },
   },
   {
-    "context": "Editor && (showing_code_actions || showing_completions)",
+    "context": "Editor && showing_peek_references",
+    "bindings": {
+      "enter": "editor::ConfirmPeekReference",
+      "shift-enter": "editor::OpenPeekedReferencesInMultibuffer",
+    },
+  },
+  {
+    "context": "Editor && (showing_code_actions || showing_completions || showing_peek_references)",
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",
       "up": "editor::ContextMenuPrevious",
