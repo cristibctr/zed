@@ -1442,12 +1442,21 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
+        let task = self.show_peek_references(window, cx)?;
+        Some(cx.spawn(async move |_, _| task.await.map(|_| ())))
+    }
+
+    pub(crate) fn show_peek_references(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<bool>>> {
         {
             let mut context_menu = self.context_menu.borrow_mut();
             if let Some(CodeContextMenu::References(_)) = context_menu.as_ref() {
                 *context_menu = None;
                 cx.notify();
-                return Some(Task::ready(Ok(())));
+                return Some(Task::ready(Ok(true)));
             }
         }
 
@@ -1460,16 +1469,16 @@ impl Editor {
             project.update(cx, |project, cx| project.references(&buffer, text_head, cx));
         Some(cx.spawn_in(window, async move |editor, cx| {
             let Some(locations) = references.await? else {
-                return anyhow::Ok(());
+                return anyhow::Ok(false);
             };
             if locations.is_empty() {
                 // totally normal - the cursor may be on something which is not
                 // a symbol (e.g. a keyword)
                 log::info!("no references found under cursor");
-                return Ok(());
+                return Ok(false);
             }
 
-            editor.update_in(cx, |editor, _window, cx| {
+            let shown = editor.update_in(cx, |editor, _window, cx| {
                 let snapshot = editor.buffer.read(cx).snapshot(cx);
                 if editor
                     .selections
@@ -1480,18 +1489,19 @@ impl Editor {
                 {
                     // The cursor moved while references were being fetched, so
                     // the popup would be anchored to a stale position.
-                    return;
+                    return true;
                 }
 
                 let menu = ReferencesMenu::new(locations, cx);
                 if !menu.visible() {
-                    return;
+                    return false;
                 }
                 crate::hover_popover::hide_hover(editor, cx);
                 *editor.context_menu.borrow_mut() = Some(CodeContextMenu::References(menu));
                 cx.notify();
+                true
             })?;
-            Ok(())
+            Ok(shown)
         }))
     }
 

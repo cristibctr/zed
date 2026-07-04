@@ -214,6 +214,45 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
+        if self.should_peek_references_on_click(point, &modifiers, cx) {
+            if let Some(peek_references) = self.peek_references_on_click(point, window, cx) {
+                cx.spawn_in(window, async move |editor, cx| {
+                    let references_peeked = peek_references.await.log_err().unwrap_or(false);
+                    if references_peeked {
+                        editor
+                            .update(cx, |editor, cx| editor.hide_hovered_link(cx))
+                            .log_err();
+                        return;
+                    }
+
+                    let Ok(reveal_task) = editor.update_in(cx, |editor, window, cx| {
+                        editor.cmd_click_reveal_task(point, modifiers, window, cx)
+                    }) else {
+                        return;
+                    };
+                    let definition_revealed = reveal_task.await.log_err().unwrap_or(Navigated::No);
+                    let find_references = editor
+                        .update_in(cx, |editor, window, cx| {
+                            if definition_revealed == Navigated::Yes {
+                                return None;
+                            }
+                            match EditorSettings::get_global(cx).go_to_definition_fallback {
+                                GoToDefinitionFallback::None => None,
+                                GoToDefinitionFallback::FindAllReferences => editor
+                                    .find_all_references(&FindAllReferences::default(), window, cx),
+                            }
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(find_references) = find_references {
+                        find_references.await.log_err();
+                    }
+                })
+                .detach();
+                return;
+            }
+        }
+
         let reveal_task = self.cmd_click_reveal_task(point, modifiers, window, cx);
         cx.spawn_in(window, async move |editor, cx| {
             let definition_revealed = reveal_task.await.log_err().unwrap_or(Navigated::No);
@@ -236,6 +275,46 @@ impl Editor {
             }
         })
         .detach();
+    }
+
+    fn should_peek_references_on_click(
+        &self,
+        point: PointForPosition,
+        modifiers: &Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        point.as_valid().is_some()
+            && !modifiers.shift
+            && !Self::is_alt_pressed(modifiers, cx)
+            && self.hovered_link_state.as_ref().map_or(true, |state| {
+                state
+                    .links
+                    .iter()
+                    .all(|link| matches!(link, HoverLink::Text(_)))
+            })
+    }
+
+    fn peek_references_on_click(
+        &mut self,
+        point: PointForPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<bool>>> {
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
+        self.select(
+            SelectPhase::Begin {
+                position: point.next_valid,
+                add: false,
+                click_count: 1,
+            },
+            window,
+            cx,
+        );
+        let task = self.show_peek_references(window, cx);
+        self.select(SelectPhase::End, window, cx);
+        task
     }
 
     pub fn scroll_hover(

@@ -27714,6 +27714,82 @@ async fn test_peek_references_popup(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_ctrl_click_peeks_references(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            definition_provider: Some(lsp::OneOf::Left(true)),
+            references_provider: Some(lsp::OneOf::Left(true)),
+            ..lsp::ServerCapabilities::default()
+        },
+        cx,
+    )
+    .await;
+
+    cx.set_state(
+        &r#"
+        fn one() {
+            let mut a = ˇtwo();
+            let mut b = two();
+        }
+
+        fn two() {}"#
+            .unindent(),
+    );
+    let click_position = cx.pixel_position(
+        &r#"
+        fn one() {
+            let mut a = tˇwo();
+            let mut b = two();
+        }
+
+        fn two() {}"#
+            .unindent(),
+    );
+    let mut reference_requests = cx
+        .lsp
+        .set_request_handler::<lsp::request::References, _, _>(move |params, _| async move {
+            Ok(Some(vec![
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri.clone(),
+                    range: lsp::Range::new(lsp::Position::new(1, 16), lsp::Position::new(1, 19)),
+                },
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri.clone(),
+                    range: lsp::Range::new(lsp::Position::new(2, 16), lsp::Position::new(2, 19)),
+                },
+                lsp::Location {
+                    uri: params.text_document_position.text_document.uri,
+                    range: lsp::Range::new(lsp::Position::new(5, 3), lsp::Position::new(5, 6)),
+                },
+            ]))
+        });
+
+    cx.simulate_click(click_position, gpui::Modifiers::secondary_key());
+    reference_requests.next().await;
+    cx.run_until_parked();
+
+    cx.update_editor(|editor, _, _| {
+        let context_menu = editor.context_menu.borrow();
+        let Some(CodeContextMenu::References(menu)) = context_menu.as_ref() else {
+            panic!("expected ctrl-click to show the peek references popup");
+        };
+        assert_eq!(menu.locations.len(), 3);
+        assert_eq!(menu.selected_item, 1);
+    });
+    cx.assert_editor_state(
+        &r#"
+        fn one() {
+            let mut a = ˇtwo();
+            let mut b = two();
+        }
+
+        fn two() {}"#
+            .unindent(),
+    );
+}
+
+#[gpui::test]
 async fn test_find_enclosing_node_with_task(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

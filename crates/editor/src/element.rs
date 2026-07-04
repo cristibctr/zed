@@ -537,7 +537,11 @@ impl EditorElement {
                 cx.propagate();
             }
         });
-        register_action(editor, window, Editor::open_peeked_references_in_multibuffer);
+        register_action(
+            editor,
+            window,
+            Editor::open_peeked_references_in_multibuffer,
+        );
         register_action(editor, window, Editor::show_signature_help);
         register_action(editor, window, Editor::signature_help_prev);
         register_action(editor, window, Editor::signature_help_next);
